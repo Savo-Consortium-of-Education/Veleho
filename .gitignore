@@ -1,0 +1,14 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+
+# Paikalliset vientikansiot. GitHub Actions rakentaa omansa.
+# build/.gdignore pidetään mukana, jotta Godot ei tuo vientitiedostoja projektiin.
+/build/*
+!/build/.gdignore
+
+# Python-assettityökalujen välimuisti
+__pycache__/
+
+# Clauden paikalliset asetukset (esikatselupalvelin)
+/.claude/

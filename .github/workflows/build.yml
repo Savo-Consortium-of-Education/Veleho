@@ -1,0 +1,144 @@
+# Rakentaa Velehon selain- ja Windows-versiot Godotilla.
+#
+# - Push main-haaraan: selainversio julkaistaan GitHub Pagesiin
+#   (Settings → Pages → Source: "GitHub Actions" pitää valita kerran).
+# - Jokainen ajo: molemmat versiot tallentuvat ajon artifakteiksi (Actions → ajo → Artifacts).
+# - Push v-alkuiseen tagiin (esim. v0.1.0): zipit liitetään GitHub-julkaisuun (Releases).
+#
+# Versiot rakennetaan erillisinä töinä, joten Windows-viennin ongelma ei estä
+# selainversion julkaisua.
+name: Rakenna ja julkaise
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  GODOT_VERSION: "4.7.2"
+  GODOT_STATUS: "stable"
+
+jobs:
+  export:
+    name: Vie ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: selainversio
+            preset: Web
+            dir: web
+            file: index.html
+          - name: Windows-versio
+            preset: Windows
+            dir: windows
+            file: Veleho.exe
+    steps:
+      - name: Hae koodi
+        uses: actions/checkout@v7
+
+      - name: Godot ja vientipohjat välimuistista
+        id: cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/godot
+            ~/.local/share/godot/export_templates
+          key: godot-${{ env.GODOT_VERSION }}-${{ env.GODOT_STATUS }}-web-windows
+
+      - name: Lataa Godot ja vientipohjat
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          tag="${GODOT_VERSION}-${GODOT_STATUS}"
+          base="https://github.com/godotengine/godot-builds/releases/download/${tag}"
+          tpl="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}"
+          curl -fsSL --retry 5 -o "Godot_v${tag}_linux.x86_64.zip" "${base}/Godot_v${tag}_linux.x86_64.zip"
+          curl -fsSL --retry 5 -o "Godot_v${tag}_export_templates.tpz" "${base}/Godot_v${tag}_export_templates.tpz"
+          curl -fsSL --retry 5 -o SHA512-SUMS.txt "${base}/SHA512-SUMS.txt"
+          grep -E "  Godot_v${tag}_(linux\.x86_64\.zip|export_templates\.tpz)$" SHA512-SUMS.txt | sha512sum -c -
+          mkdir -p "$HOME/godot" "$tpl"
+          unzip -q "Godot_v${tag}_linux.x86_64.zip" -d "$HOME/godot"
+          mv "$HOME/godot/Godot_v${tag}_linux.x86_64" "$HOME/godot/godot"
+          unzip -q -j "Godot_v${tag}_export_templates.tpz" \
+            templates/version.txt \
+            templates/web_nothreads_release.zip \
+            templates/web_nothreads_debug.zip \
+            templates/windows_release_x86_64.exe \
+            templates/windows_release_x86_64_console.exe \
+            -d "$tpl"
+          rm "Godot_v${tag}_linux.x86_64.zip" "Godot_v${tag}_export_templates.tpz" SHA512-SUMS.txt
+
+      - name: Tuo assetit
+        run: |
+          # build/.gdignore estää Godotia tuomasta vientitiedostoja (index.png ym.) takaisin projektiin.
+          mkdir -p "build/${{ matrix.dir }}"
+          touch build/.gdignore
+          # Ensimmäinen tuonti voi joskus kaatua vasta lopetusvaiheessa, joten kokeillaan kahdesti.
+          ~/godot/godot --headless --path . --import || ~/godot/godot --headless --path . --import
+
+      - name: Vie ${{ matrix.name }}
+        run: |
+          ~/godot/godot --headless --path . --export-release "${{ matrix.preset }}" "build/${{ matrix.dir }}/${{ matrix.file }}"
+          test -s "build/${{ matrix.dir }}/${{ matrix.file }}"
+          ls -lh "build/${{ matrix.dir }}"
+
+      - name: Tallenna artifaktiksi
+        uses: actions/upload-artifact@v7
+        with:
+          name: veleho-${{ matrix.dir }}
+          path: build/${{ matrix.dir }}/
+
+      - name: Lähetä selainversio Pagesille
+        if: matrix.dir == 'web' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: build/web/
+
+  pages:
+    name: Julkaise GitHub Pagesiin
+    needs: export
+    # Julkaistaan, vaikka Windows-vienti epäonnistuisi.
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - name: Julkaise
+        id: deployment
+        uses: actions/deploy-pages@v5
+
+  release:
+    name: Luo julkaisu
+    needs: export
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Hae vientitiedostot
+        uses: actions/download-artifact@v8
+        with:
+          pattern: veleho-*
+          path: dist
+
+      - name: Pakkaa ja julkaise
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd dist
+          (cd veleho-web && zip -qr ../veleho-web.zip .)
+          (cd veleho-windows && zip -qr ../veleho-windows.zip .)
+          ls -lh ./*.zip
+          gh release create "$GITHUB_REF_NAME" veleho-windows.zip veleho-web.zip \
+            --title "Veleho $GITHUB_REF_NAME" --generate-notes
